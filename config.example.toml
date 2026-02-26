@@ -1,0 +1,28 @@
+[wallet]
+private_key_env = "POLYMARKET_PRIVATE_KEY"
+signature_type = "eoa"  # eoa | proxy | gnosis_safe
+
+[strategy]
+base_offset_cents = 1.0        # Base spread from midpoint in cents
+min_offset_cents = 0.5         # Minimum offset
+requote_interval_secs = 30     # Timer-based requote
+requote_threshold_cents = 0.5  # Midpoint shift trigger
+order_size = 500               # Shares per side per level
+num_levels = 2                 # Number of price levels per side
+inventory_cap = 5000           # Max net position per token
+
+[markets]
+mode = "auto"                  # auto (scan + rank) | manual (explicit list)
+max_markets = 20               # Max concurrent markets
+min_reward_daily = 5.0         # Minimum daily reward to bother with ($)
+prefer_fee_enabled = true      # Prioritize fee-enabled for rebates
+
+[risk]
+max_total_capital = 2000.0     # Total USDC to deploy
+max_per_market = 500.0         # Max capital per market
+kill_switch_loss = 100.0       # Cancel everything if loss exceeds this
+
+[monitoring]
+log_level = "info"
+telegram_bot_token = ""
+telegram_chat_id = ""
