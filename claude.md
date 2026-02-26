@@ -4,42 +4,24 @@
 Polymarket LP bot in Rust. Farms liquidity rewards by posting two-sided limit orders around the midpoint.
 
 ## Current Phase
-**Phase 1: Midpoint Quoting Engine (Dry Run)** — In progress
+**All phases 0-6 complete.** Phase 7 (Advanced Strategies) is stretch goals, skipped.
 
 ## Status
 - [x] Phase 0: Project Scaffold & Read-Only Client
-  - [x] Cargo project initialized with polymarket-client-sdk v0.4
-  - [x] Config module (TOML parsing, all strategy/risk/market params)
-  - [x] Auth flow (LocalSigner → CLOB authenticate)
-  - [x] Market scanner (Gamma API fetch + filtering)
-  - [x] Market ranking (score by reward/liquidity ratio)
-  - [x] CLI (`scan`, `run`, `status` subcommands)
-- [ ] Phase 1: Midpoint Quoting Engine (Dry Run)
-- [ ] Phase 2: Live Order Placement (Single Market)
-- [ ] Phase 3: WebSocket & Real-Time Requoting
-- [ ] Phase 4: Inventory & Risk Management
-- [ ] Phase 5: Multi-Market Execution
-- [ ] Phase 6: Monitoring, Metrics & Dashboard
+- [x] Phase 1: Midpoint Quoting Engine (Dry Run)
+- [x] Phase 2: Live Order Placement (Single Market)
+- [x] Phase 3: WebSocket & Real-Time Requoting
+- [x] Phase 4: Inventory & Risk Management
+- [x] Phase 5: Multi-Market Execution
+- [x] Phase 6: Monitoring, Metrics & Dashboard
+- [ ] Phase 7: Advanced Strategies (Stretch — skipped)
 
 ## Key Technical Decisions
-- **Language:** Rust
-- **SDK:** `polymarket-client-sdk` v0.4.3 (latest) — NOT v0.3 as originally planned
-  - Features: `clob`, `ws`, `gamma`, `data`, `heartbeats`, `ctf`, `tracing`
-  - Type-level state machine: `Client<Unauthenticated>` → `Client<Authenticated<Normal>>`
-  - Re-exports: alloy primitives (Address, B256, U256), rust_decimal, chrono
-  - `bon::Builder` for all request types
-  - Gamma Market `condition_id` is `Option<B256>`, `clob_token_ids` is `Option<Vec<U256>>`
+- **SDK:** `polymarket-client-sdk` v0.4.3 — type-level auth state machine
 - **Config:** TOML via `serde` + `toml`
-- **CLI:** `clap` for subcommands (`scan`, `run`, `status`)
-- **Async:** `tokio`
-- **Auth model:** L1 (EIP-712) → L2 (HMAC) — SDK handles via `authentication_builder`
-
-## Architecture Notes
-- One `QuoteEngine` per market, managed by a `MarketManager`
-- WebSocket for real-time book data (Phase 3), REST polling initially (Phase 1-2)
-- Gamma Market fields: `rewards_min_size`, `rewards_max_spread` (NOT min_incentive_size/max_incentive_spread)
-- `order_price_min_tick_size` on Gamma Market for tick size
-- `competitive` field used as reward proxy for scoring
+- **CLI:** `clap` — subcommands: `scan`, `run`, `status`
+- **Persistence:** JSON via `serde_json` for metrics
+- **Alerting:** Telegram bot API via `reqwest`
 
 ## SDK API Quick Reference
 - `clob::Client::new(host, config)` → unauthenticated
@@ -50,24 +32,29 @@ Polymarket LP bot in Rust. Farms liquidity rewards by posting two-sided limit or
 - `.post_order(signed)` / `.post_orders(vec)` → `PostOrderResponse`
 - `.cancel_order(id)` / `.cancel_all_orders()`
 - `gamma::Client::default()` then `.markets(&MarketsRequest)`
-- WS: `clob::ws::Client::default()`, `.subscribe_orderbook(asset_ids)`
+- WS: `clob::ws::Client::default()`, `.subscribe_midpoints(asset_ids)`
+- Gamma Market: `condition_id` is `Option<B256>`, `clob_token_ids` is `Option<Vec<U256>>`
+- Gamma Market reward fields: `rewards_min_size`, `rewards_max_spread`, `competitive`
 
 ## File Structure
 ```
 src/
-├── main.rs          # CLI entry point
-├── config.rs        # TOML config parsing
-├── client.rs        # Polymarket client wrapper
-├── scanner.rs       # Market discovery + ranking
-├── quoter.rs        # Quote generation + offset calculation (Phase 1)
-├── engine.rs        # Per-market quoting engine (Phase 1-2)
-├── orders.rs        # Order placement + tracking (Phase 2)
-├── ws.rs            # WebSocket manager (Phase 3)
-├── risk.rs          # Inventory + risk management (Phase 4)
-├── inventory.rs     # CTF split/merge/redeem (Phase 4)
-├── manager.rs       # Multi-market orchestration (Phase 5)
-└── metrics.rs       # Logging, PnL tracking (Phase 6)
+├── main.rs          # CLI entry, run loops (scan/run/run --multi/status)
+├── config.rs        # TOML config: wallet, strategy, markets, risk, monitoring
+├── client.rs        # CLOB + Gamma client creation, auth flow
+├── scanner.rs       # Gamma API market fetch, filtering, ranking
+├── quoter.rs        # Offset calc, tick alignment, quote generation, score estimation
+├── engine.rs        # Per-market quoting engine (dry-run + live + WS event handling)
+├── orders.rs        # Order placement, cancellation, tracking, reconciliation
+├── ws.rs            # WebSocket manager (midpoint, book, user events, reconnect)
+├── risk.rs          # Inventory caps, skewing, kill switch, capital allocation
+├── inventory.rs     # CTF split/merge/redeem interfaces, balance checking
+├── manager.rs       # Multi-market orchestration, rate limiter, rescan
+└── metrics.rs       # PnL tracking, fill rates, persistence, Telegram alerts, dashboard
 ```
 
+## Test Coverage
+24 unit tests: config(2), scanner(2), quoter(8), risk(5), manager(2), metrics(4), + 1 persistence
+
 ## Last Updated
-Phase 0 complete — all tests pass, cargo build succeeds.
+All phases 0-6 complete. 24 tests passing. Build succeeds.

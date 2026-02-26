@@ -3,6 +3,7 @@ mod config;
 mod engine;
 mod inventory;
 mod manager;
+mod metrics;
 mod orders;
 mod quoter;
 mod risk;
@@ -443,7 +444,46 @@ async fn cmd_run_multi(config: &config::Config, live: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_status(_config: &config::Config) -> Result<()> {
-    println!("Status dashboard will be implemented in Phase 6");
+async fn cmd_status(config: &config::Config) -> Result<()> {
+    // Load persisted metrics if available
+    let metrics_path = std::path::Path::new("metrics.json");
+    let portfolio = if metrics_path.exists() {
+        metrics::PortfolioMetrics::load(metrics_path)?
+    } else {
+        println!("No metrics data found. Run the bot first to generate metrics.");
+        println!("Showing live market overview instead.\n");
+
+        // Show a live scan as fallback
+        let gamma_client = client::create_gamma_client()?;
+        let markets = scanner::scan_markets(&gamma_client).await?;
+        let ranked = scanner::rank_markets(&markets, config.markets.min_reward_daily, 10);
+
+        let market_data: Vec<(String, Decimal, Decimal, usize)> = ranked
+            .iter()
+            .map(|m| (m.question.clone(), Decimal::ZERO, Decimal::ZERO, 0))
+            .collect();
+
+        let empty_portfolio = metrics::PortfolioMetrics::new();
+        let dashboard = metrics::format_dashboard(&empty_portfolio, &market_data);
+        println!("{dashboard}");
+        return Ok(());
+    };
+
+    let market_data: Vec<(String, Decimal, Decimal, usize)> = portfolio
+        .markets
+        .values()
+        .map(|m| {
+            (
+                m.question.clone(),
+                m.last_midpoint.unwrap_or(Decimal::ZERO),
+                m.inventory_yes - m.inventory_no,
+                0,
+            )
+        })
+        .collect();
+
+    let dashboard = metrics::format_dashboard(&portfolio, &market_data);
+    println!("{dashboard}");
+
     Ok(())
 }
