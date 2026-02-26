@@ -1,12 +1,16 @@
 mod client;
 mod config;
+mod engine;
+mod quoter;
 mod scanner;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Table};
 use rust_decimal::Decimal;
 use std::path::PathBuf;
+use tokio::signal;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -48,11 +52,9 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Load config (optional for scan command)
     let config = if cli.config.exists() {
         config::Config::load(&cli.config)?
     } else {
-        // Minimal default config for commands that don't need auth
         config::Config {
             wallet: config::WalletConfig {
                 private_key_env: "POLYMARKET_PRIVATE_KEY".into(),
@@ -65,7 +67,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Init tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -129,7 +130,10 @@ async fn cmd_scan(config: &config::Config, min_reward: Option<f64>, limit: usize
     println!("{table}");
     println!(
         "\nFound {} rewarded markets (showing top {})",
-        all_markets.iter().filter(|m| m.reward_daily_estimate >= min_reward_dec).count(),
+        all_markets
+            .iter()
+            .filter(|m| m.reward_daily_estimate >= min_reward_dec)
+            .count(),
         ranked.len()
     );
 
@@ -137,19 +141,70 @@ async fn cmd_scan(config: &config::Config, min_reward: Option<f64>, limit: usize
 }
 
 async fn cmd_run(config: &config::Config, live: bool, market: Option<String>) -> Result<()> {
-    if !live {
-        println!("DRY-RUN mode (use --live to place real orders)");
+    let dry_run = !live;
+    if dry_run {
+        info!("DRY-RUN mode (use --live to place real orders)");
     }
 
-    let _client = client::create_authenticated_client(config).await?;
+    // For dry-run, we can use unauthenticated client; for live we need auth
+    let clob_client = if live {
+        warn!("Live mode: authenticating...");
+        // TODO: return authenticated client for Phase 2
+        bail!("Live order placement requires Phase 2 implementation");
+    } else {
+        client::create_unauthenticated_client()?
+    };
 
-    println!("LP bot starting... (quoting engine not yet implemented)");
+    // Find the target market
+    let gamma_client = client::create_gamma_client()?;
+    let markets = scanner::scan_markets(&gamma_client).await?;
 
-    if let Some(market_id) = market {
-        println!("Target market: {market_id}");
+    let target = if let Some(ref cond_id) = market {
+        markets
+            .iter()
+            .find(|m| m.condition_id.starts_with(cond_id))
+            .cloned()
+    } else {
+        // Pick the top-ranked market
+        scanner::rank_markets(&markets, config.markets.min_reward_daily, 1)
+            .into_iter()
+            .next()
+    };
+
+    let target = match target {
+        Some(m) => m,
+        None => bail!("No suitable market found"),
+    };
+
+    info!(
+        market = %target.question,
+        condition_id = %target.condition_id,
+        "Selected market"
+    );
+
+    let mut engine = engine::QuoteEngine::new(target, config.strategy.clone(), dry_run);
+
+    info!("Starting quoting loop (Ctrl+C to stop)...");
+
+    let tick_interval = std::time::Duration::from_secs(config.strategy.requote_interval_secs);
+
+    loop {
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Shutdown signal received");
+                break;
+            }
+            result = engine.tick(&clob_client) => {
+                if let Err(e) = result {
+                    warn!(error = %e, "Engine tick error");
+                }
+            }
+        }
+
+        tokio::time::sleep(tick_interval).await;
     }
 
-    println!("Run command will be implemented in Phase 1-2");
+    info!("Quoting engine stopped");
     Ok(())
 }
 
