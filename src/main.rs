@@ -2,6 +2,7 @@ mod client;
 mod config;
 mod engine;
 mod inventory;
+mod manager;
 mod orders;
 mod quoter;
 mod risk;
@@ -47,12 +48,15 @@ enum Commands {
         /// Actually place orders (disable dry-run)
         #[arg(long)]
         live: bool,
-        /// Target a specific market condition ID
+        /// Target a specific market condition ID (single-market mode)
         #[arg(short, long)]
         market: Option<String>,
         /// Disable WebSocket (use REST polling only)
         #[arg(long)]
         no_ws: bool,
+        /// Run across multiple markets (auto-select based on config)
+        #[arg(long)]
+        multi: bool,
     },
     /// Show current status, positions, and PnL
     Status,
@@ -88,8 +92,17 @@ async fn main() -> Result<()> {
         Commands::Scan { min_reward, limit } => {
             cmd_scan(&config, min_reward, limit).await?;
         }
-        Commands::Run { live, market, no_ws } => {
-            cmd_run(&config, live, market, no_ws).await?;
+        Commands::Run {
+            live,
+            market,
+            no_ws,
+            multi,
+        } => {
+            if multi {
+                cmd_run_multi(&config, live).await?;
+            } else {
+                cmd_run(&config, live, market, no_ws).await?;
+            }
         }
         Commands::Status => {
             cmd_status(&config).await?;
@@ -355,6 +368,78 @@ async fn cmd_run(
     }
 
     info!("Quoting engine stopped");
+    Ok(())
+}
+
+async fn cmd_run_multi(config: &config::Config, live: bool) -> Result<()> {
+    if !live {
+        bail!("Multi-market mode requires --live flag");
+    }
+
+    let auth_client = client::create_authenticated_client(config).await?;
+    let private_key = config.private_key()?;
+    let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
+
+    let gamma_client = client::create_gamma_client()?;
+    let markets = scanner::scan_markets(&gamma_client).await?;
+    let ranked = scanner::rank_markets(
+        &markets,
+        config.markets.min_reward_daily,
+        config.markets.max_markets,
+    );
+
+    if ranked.is_empty() {
+        bail!("No suitable markets found");
+    }
+
+    let mut mgr = manager::MarketManager::new(config.clone());
+    mgr.initialize_markets(ranked);
+
+    info!(
+        markets = mgr.engines.len(),
+        "Starting multi-market LP bot (Ctrl+C to stop)"
+    );
+
+    let tick_interval = std::time::Duration::from_secs(config.strategy.requote_interval_secs);
+
+    loop {
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Shutdown signal received, cancelling all orders...");
+                if let Err(e) = mgr.cancel_all_markets(&auth_client).await {
+                    warn!(error = %e, "Error cancelling orders during shutdown");
+                }
+                break;
+            }
+            _ = async {
+                // Periodic rescan
+                if mgr.needs_rescan() {
+                    if let Err(e) = mgr.rescan(&gamma_client).await {
+                        warn!(error = %e, "Market rescan failed");
+                    }
+                }
+
+                // Tick all markets
+                if let Err(e) = mgr.tick_all(&auth_client, &signer).await {
+                    warn!(error = %e, "Multi-market tick error");
+                }
+
+                // Log portfolio stats periodically
+                let stats = mgr.portfolio_stats();
+                info!(
+                    markets = stats.total_markets,
+                    active = stats.active_markets,
+                    capital = %stats.total_capital_deployed,
+                    pnl = %stats.total_unrealized_pnl,
+                    "Portfolio status"
+                );
+
+                tokio::time::sleep(tick_interval).await;
+            } => {}
+        }
+    }
+
+    info!("Multi-market LP bot stopped");
     Ok(())
 }
 
