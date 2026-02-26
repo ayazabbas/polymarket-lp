@@ -1,28 +1,40 @@
+# Polymarket LP Bot — Default Configuration
+#
+# This is the DEFAULT config with moderate settings.
+# For a safer starting point, see config.conservative.toml
+#
+# Copy this file to config.toml and edit before running.
+
 [wallet]
-private_key_env = "POLYMARKET_PRIVATE_KEY"
-signature_type = "eoa"  # eoa | proxy | gnosis_safe
+private_key_env = "POLYMARKET_PRIVATE_KEY"  # env var holding your private key
+signature_type = "eoa"                       # eoa | proxy | gnosis_safe
 
 [strategy]
-base_offset_cents = 1.0        # Base spread from midpoint in cents
-min_offset_cents = 0.5         # Minimum offset
-requote_interval_secs = 30     # Timer-based requote
-requote_threshold_cents = 0.5  # Midpoint shift trigger
-order_size = 500               # Shares per side per level
-num_levels = 2                 # Number of price levels per side
-inventory_cap = 5000           # Max net position per token
+base_offset_cents = 1.0        # Spread from midpoint (cents). Tighter = more rewards but more risk
+min_offset_cents = 0.5         # Floor — never go tighter than this
+requote_interval_secs = 30     # Requote on timer even if midpoint hasn't moved
+requote_threshold_cents = 0.5  # Midpoint shift (cents) that triggers immediate requote
+order_size = 500               # Shares per order per level
+num_levels = 2                 # Price levels per side (2 = two bids + two asks)
+inventory_cap = 5000           # Max net position per token before pausing that side
 
 [markets]
-mode = "auto"                  # auto (scan + rank) | manual (explicit list)
-max_markets = 20               # Max concurrent markets
-min_reward_daily = 5.0         # Minimum daily reward to bother with ($)
-prefer_fee_enabled = true      # Prioritize fee-enabled for rebates
+mode = "auto"                  # auto = scan + rank best markets | manual = use list below
+max_markets = 20               # Max concurrent markets to quote
+min_reward_daily = 5.0         # Ignore markets paying less than this per day ($)
+prefer_fee_enabled = true      # Prioritize fee-enabled markets for rebate income
+min_resolution_days = 7        # Skip markets resolving within this many days
+avoid_tags = []                # Tags to skip, e.g. ["politics", "insider-risk"]
+# manual_markets = ["0xabc...", "0xdef..."]  # Used when mode = "manual"
 
 [risk]
-max_total_capital = 2000.0     # Total USDC to deploy
-max_per_market = 500.0         # Max capital per market
-kill_switch_loss = 100.0       # Cancel everything if loss exceeds this
+max_total_capital = 2000.0     # Total USDC to deploy across all markets
+max_per_market = 500.0         # Max USDC per single market
+kill_switch_loss = 100.0       # Cancel EVERYTHING if total loss exceeds this
+skew_factor = 0.5              # Inventory skew aggressiveness (0.0 = none, 1.0 = max)
+per_market_loss_limit = 50.0   # Pause quoting a market if its loss exceeds this
 
 [monitoring]
-log_level = "info"
-telegram_bot_token = ""
-telegram_chat_id = ""
+log_level = "info"             # debug | info | warn | error
+telegram_bot_token = ""        # Optional: Telegram bot token for alerts
+telegram_chat_id = ""          # Optional: Telegram chat ID for alerts

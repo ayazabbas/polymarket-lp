@@ -1,0 +1,84 @@
+# Polymarket LP Bot — Conservative Configuration
+#
+# USE THIS FOR YOUR FIRST DEPLOYMENT.
+#
+# Philosophy: survive and learn. Wide spreads, small sizes, few markets.
+# You'll earn fewer rewards but you won't blow up while learning the dynamics.
+#
+# Once you've run for 1-2 weeks and understand the PnL breakdown
+# (spread capture vs rewards vs adverse selection), start tightening.
+#
+# Tuning path:
+#   1. Start here (week 1-2): learn, monitor, check daily
+#   2. Tighten offset to 1.5¢, increase size to 300 (week 3-4)
+#   3. Add more markets (5-8), increase capital to $1000 (month 2)
+#   4. Move to config.example.toml defaults if everything looks good
+
+[wallet]
+private_key_env = "POLYMARKET_PRIVATE_KEY"
+signature_type = "eoa"
+
+[strategy]
+base_offset_cents = 2.0        # WIDE — sacrifice reward score for safety
+                                # Default is 1.0. At 2.0 you score ~44% of max
+                                # but you're much less likely to get picked off
+min_offset_cents = 1.0         # Never go tighter than 1¢ from midpoint
+requote_interval_secs = 15     # Requote faster to reduce stale order exposure
+requote_threshold_cents = 0.3  # React to smaller midpoint moves
+order_size = 200               # SMALL — $200 exposure per order, not $500
+num_levels = 1                 # ONE level only — simpler, less exposure
+                                # Total exposure per market: 200 × 1 × 2 sides = 400 shares
+inventory_cap = 1000           # TIGHT cap — max $1000 net position per token
+                                # Default is 5000. This forces aggressive skewing early.
+
+[markets]
+mode = "auto"
+max_markets = 3                # START WITH 3 — easy to monitor manually
+min_reward_daily = 10.0        # Only bother with markets paying $10+/day
+                                # Higher threshold = more competitive, but more volume = safer
+prefer_fee_enabled = true      # Fee-enabled markets give you rebates as a buffer
+min_resolution_days = 14       # AVOID anything resolving within 2 weeks
+                                # Resolution risk is the #1 way to lose money
+avoid_tags = []                # Consider adding "politics" if you want to avoid
+                                # high-info-asymmetry markets
+
+[risk]
+max_total_capital = 500.0      # START WITH $500 — enough to learn, not enough to hurt
+max_per_market = 200.0         # Max $200 per market — forces diversification
+kill_switch_loss = 50.0        # Pull the plug at $50 total loss (10% of capital)
+                                # Aggressive, but you'd rather stop and investigate
+skew_factor = 0.8              # AGGRESSIVE skewing — when inventory builds up,
+                                # skew hard to get rid of it. Better to miss some
+                                # reward score than hold a big directional position.
+per_market_loss_limit = 25.0   # Stop quoting a market at $25 loss
+                                # Investigate before re-enabling
+
+[monitoring]
+log_level = "info"             # Use "debug" for first few hours to see everything
+telegram_bot_token = ""        # STRONGLY RECOMMENDED — set this up so you get
+telegram_chat_id = ""          # alerts for fills, errors, and kill switch triggers
+
+# ─────────────────────────────────────────────────────────
+# WHAT THIS CONFIG DOES:
+#
+# • Deploys $500 across 3 markets (~$166 each, capped at $200)
+# • Posts 1 bid + 1 ask per token, 200 shares each
+# • Quotes 2¢ from midpoint (wider = safer, less reward)
+# • Requotes every 15 seconds or on 0.3¢ midpoint shift
+# • Skews aggressively to shed inventory
+# • Avoids markets resolving within 14 days
+# • Kills everything at $50 total loss or $25 per-market loss
+#
+# EXPECTED RESULTS (rough):
+# • Reward income: $2-8/day (depends on market competition)
+# • Spread capture: ~$0-2/day (wide spread = fewer fills)
+# • Risk: max $50 loss before kill switch fires
+# • Break-even: ~1-2 weeks to cover setup time
+#
+# WHAT TO WATCH:
+# • Trading PnL (spread captures - adverse selection losses)
+# • If trading PnL is consistently negative, widen offset more
+# • If rewards >> trading losses, you're profitable — start tightening
+# • Inventory buildup — if one side keeps growing, that market may
+#   have informed traders. Consider removing it.
+# ─────────────────────────────────────────────────────────

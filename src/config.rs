@@ -54,6 +54,12 @@ pub struct MarketsConfig {
     pub prefer_fee_enabled: bool,
     #[serde(default)]
     pub manual_markets: Vec<String>,
+    /// Skip markets resolving within this many days (avoid resolution risk)
+    #[serde(default = "default_min_resolution_days")]
+    pub min_resolution_days: u32,
+    /// Tags to avoid (e.g., politics, niche events with insider risk)
+    #[serde(default)]
+    pub avoid_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +70,12 @@ pub struct RiskConfig {
     pub max_per_market: Decimal,
     #[serde(default = "default_kill_switch_loss")]
     pub kill_switch_loss: Decimal,
+    /// How aggressively to skew quotes when inventory is imbalanced (0.0-1.0)
+    #[serde(default = "default_skew_factor")]
+    pub skew_factor: Decimal,
+    /// Pause quoting entirely if net loss per market exceeds this
+    #[serde(default = "default_per_market_loss_limit")]
+    pub per_market_loss_limit: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +128,9 @@ fn default_min_reward_daily() -> Decimal {
 fn default_prefer_fee_enabled() -> bool {
     true
 }
+fn default_min_resolution_days() -> u32 {
+    7
+}
 fn default_max_total_capital() -> Decimal {
     Decimal::new(2000, 0)
 }
@@ -124,6 +139,12 @@ fn default_max_per_market() -> Decimal {
 }
 fn default_kill_switch_loss() -> Decimal {
     Decimal::new(100, 0)
+}
+fn default_skew_factor() -> Decimal {
+    Decimal::new(5, 1) // 0.5
+}
+fn default_per_market_loss_limit() -> Decimal {
+    Decimal::new(50, 0) // $50
 }
 fn default_log_level() -> String {
     "info".into()
@@ -151,6 +172,8 @@ impl Default for MarketsConfig {
             min_reward_daily: default_min_reward_daily(),
             prefer_fee_enabled: default_prefer_fee_enabled(),
             manual_markets: vec![],
+            min_resolution_days: default_min_resolution_days(),
+            avoid_tags: vec![],
         }
     }
 }
@@ -161,6 +184,8 @@ impl Default for RiskConfig {
             max_total_capital: default_max_total_capital(),
             max_per_market: default_max_per_market(),
             kill_switch_loss: default_kill_switch_loss(),
+            skew_factor: default_skew_factor(),
+            per_market_loss_limit: default_per_market_loss_limit(),
         }
     }
 }
