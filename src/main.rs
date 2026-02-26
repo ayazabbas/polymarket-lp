@@ -1,8 +1,10 @@
 mod client;
 mod config;
 mod engine;
+mod inventory;
 mod orders;
 mod quoter;
+mod risk;
 mod scanner;
 mod ws;
 
