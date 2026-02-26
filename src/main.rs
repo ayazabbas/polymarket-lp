@@ -1,14 +1,18 @@
 mod client;
 mod config;
 mod engine;
+mod orders;
 mod quoter;
 mod scanner;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Table};
+use polymarket_client_sdk::auth::{LocalSigner, Signer};
+use polymarket_client_sdk::POLYGON;
 use rust_decimal::Decimal;
 use std::path::PathBuf;
+use std::str::FromStr;
 use tokio::signal;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -146,15 +150,6 @@ async fn cmd_run(config: &config::Config, live: bool, market: Option<String>) ->
         info!("DRY-RUN mode (use --live to place real orders)");
     }
 
-    // For dry-run, we can use unauthenticated client; for live we need auth
-    let clob_client = if live {
-        warn!("Live mode: authenticating...");
-        // TODO: return authenticated client for Phase 2
-        bail!("Live order placement requires Phase 2 implementation");
-    } else {
-        client::create_unauthenticated_client()?
-    };
-
     // Find the target market
     let gamma_client = client::create_gamma_client()?;
     let markets = scanner::scan_markets(&gamma_client).await?;
@@ -165,7 +160,6 @@ async fn cmd_run(config: &config::Config, live: bool, market: Option<String>) ->
             .find(|m| m.condition_id.starts_with(cond_id))
             .cloned()
     } else {
-        // Pick the top-ranked market
         scanner::rank_markets(&markets, config.markets.min_reward_daily, 1)
             .into_iter()
             .next()
@@ -182,26 +176,55 @@ async fn cmd_run(config: &config::Config, live: bool, market: Option<String>) ->
         "Selected market"
     );
 
-    let mut engine = engine::QuoteEngine::new(target, config.strategy.clone(), dry_run);
-
-    info!("Starting quoting loop (Ctrl+C to stop)...");
-
     let tick_interval = std::time::Duration::from_secs(config.strategy.requote_interval_secs);
 
-    loop {
-        tokio::select! {
-            _ = signal::ctrl_c() => {
-                info!("Shutdown signal received");
-                break;
-            }
-            result = engine.tick(&clob_client) => {
-                if let Err(e) = result {
-                    warn!(error = %e, "Engine tick error");
+    if live {
+        // Authenticated flow for live trading
+        let auth_client = client::create_authenticated_client(config).await?;
+        let private_key = config.private_key()?;
+        let signer = LocalSigner::from_str(&private_key)?
+            .with_chain_id(Some(POLYGON));
+
+        let mut engine = engine::QuoteEngine::new(target, config.strategy.clone(), false);
+        info!("Starting LIVE quoting loop (Ctrl+C to stop)...");
+
+        loop {
+            tokio::select! {
+                _ = signal::ctrl_c() => {
+                    info!("Shutdown signal received, cancelling all orders...");
+                    if let Err(e) = engine.cancel_all(&auth_client).await {
+                        warn!(error = %e, "Error cancelling orders during shutdown");
+                    }
+                    break;
+                }
+                result = engine.tick_live(&auth_client, &signer) => {
+                    if let Err(e) = result {
+                        warn!(error = %e, "Engine tick error");
+                    }
                 }
             }
+            tokio::time::sleep(tick_interval).await;
         }
+    } else {
+        // Unauthenticated dry-run
+        let clob_client = client::create_unauthenticated_client()?;
+        let mut engine = engine::QuoteEngine::new(target, config.strategy.clone(), true);
+        info!("Starting DRY-RUN quoting loop (Ctrl+C to stop)...");
 
-        tokio::time::sleep(tick_interval).await;
+        loop {
+            tokio::select! {
+                _ = signal::ctrl_c() => {
+                    info!("Shutdown signal received");
+                    break;
+                }
+                result = engine.tick_dry_run(&clob_client) => {
+                    if let Err(e) = result {
+                        warn!(error = %e, "Engine tick error");
+                    }
+                }
+            }
+            tokio::time::sleep(tick_interval).await;
+        }
     }
 
     info!("Quoting engine stopped");

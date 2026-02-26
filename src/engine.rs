@@ -1,14 +1,18 @@
 use anyhow::{Context, Result};
+use polymarket_client_sdk::auth;
 use polymarket_client_sdk::clob;
 use polymarket_client_sdk::clob::types::request::MidpointRequest;
+use polymarket_client_sdk::clob::types::Side;
+use polymarket_client_sdk::auth::Signer;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::StrategyConfig;
+use crate::orders::{self, OrderStatus, TrackedOrder};
 use crate::quoter::{self, Quote, QuoteParams};
 use crate::scanner::MarketInfo;
 
@@ -20,11 +24,12 @@ pub struct QuoteEngine {
     pub last_midpoint: Option<Decimal>,
     pub last_requote: Option<Instant>,
     pub current_quotes: Vec<Quote>,
-    /// Active order IDs on the exchange (empty in dry-run)
-    pub active_order_ids: Vec<String>,
-    /// Net inventory: positive = long YES tokens
+    pub tracked_orders: Vec<TrackedOrder>,
     pub inventory_yes: Decimal,
     pub inventory_no: Decimal,
+    /// Cumulative fill value for PnL tracking
+    pub total_bought_value: Decimal,
+    pub total_sold_value: Decimal,
 }
 
 impl QuoteEngine {
@@ -36,19 +41,21 @@ impl QuoteEngine {
             last_midpoint: None,
             last_requote: None,
             current_quotes: Vec::new(),
-            active_order_ids: Vec::new(),
+            tracked_orders: Vec::new(),
             inventory_yes: Decimal::ZERO,
             inventory_no: Decimal::ZERO,
+            total_bought_value: Decimal::ZERO,
+            total_sold_value: Decimal::ZERO,
         }
     }
 
     /// Fetch the current midpoint from the CLOB API.
     pub async fn fetch_midpoint(
         &self,
-        clob_client: &clob::Client<impl polymarket_client_sdk::auth::state::State>,
+        clob_client: &clob::Client<impl auth::state::State>,
     ) -> Result<Decimal> {
-        let token_id = U256::from_str(&self.market.token_yes_id)
-            .context("parsing YES token ID")?;
+        let token_id =
+            U256::from_str(&self.market.token_yes_id).context("parsing YES token ID")?;
         let req = MidpointRequest::builder().token_id(token_id).build();
         let resp = clob_client
             .midpoint(&req)
@@ -61,13 +68,11 @@ impl QuoteEngine {
     pub fn should_requote(&self, new_midpoint: Decimal) -> bool {
         let threshold = self.config.requote_threshold_cents / dec!(100);
 
-        // Midpoint shift trigger
         if let Some(last_mid) = self.last_midpoint {
             if (new_midpoint - last_mid).abs() > threshold {
                 debug!(
                     old_mid = %last_mid,
                     new_mid = %new_midpoint,
-                    threshold = %threshold,
                     "Midpoint shift exceeds threshold"
                 );
                 return true;
@@ -76,7 +81,6 @@ impl QuoteEngine {
             return true; // First quote
         }
 
-        // Timer trigger
         if let Some(last_time) = self.last_requote {
             if last_time.elapsed() > Duration::from_secs(self.config.requote_interval_secs) {
                 debug!("Requote timer expired");
@@ -91,7 +95,6 @@ impl QuoteEngine {
     pub fn compute_quotes(&self, midpoint: Decimal) -> Vec<Quote> {
         let tick_size = Decimal::from_str(&self.market.tick_size).unwrap_or(dec!(0.01));
 
-        // Calculate inventory skew factor
         let net_inventory = self.inventory_yes - self.inventory_no;
         let cap = self.config.inventory_cap;
         let skew = if cap > Decimal::ZERO {
@@ -115,7 +118,6 @@ impl QuoteEngine {
 
         let quotes = quoter::generate_quotes(&params);
 
-        // Log score estimates
         for q in &quotes {
             let bid_score = quoter::estimate_score(
                 midpoint,
@@ -136,7 +138,6 @@ impl QuoteEngine {
                 level = q.level,
                 bid = %q.bid_price,
                 ask = %q.ask_price,
-                size = %q.size,
                 bid_score = %bid_score,
                 ask_score = %ask_score,
                 total_score = %total,
@@ -147,11 +148,10 @@ impl QuoteEngine {
         quotes
     }
 
-    /// Run one tick of the quoting engine: fetch midpoint, decide to requote, generate quotes.
-    /// In dry-run mode, just logs the computed orders.
-    pub async fn tick(
+    /// Dry-run tick: fetch midpoint, compute quotes, log them.
+    pub async fn tick_dry_run(
         &mut self,
-        clob_client: &clob::Client<impl polymarket_client_sdk::auth::state::State>,
+        clob_client: &clob::Client<impl auth::state::State>,
     ) -> Result<()> {
         let midpoint = self.fetch_midpoint(clob_client).await?;
 
@@ -160,18 +160,116 @@ impl QuoteEngine {
         }
 
         let quotes = self.compute_quotes(midpoint);
-
-        if self.dry_run {
-            self.log_dry_run(&quotes, midpoint);
-        } else {
-            // Phase 2 will implement actual order placement
-            warn!("Live order placement not yet implemented");
-        }
+        self.log_dry_run(&quotes, midpoint);
 
         self.last_midpoint = Some(midpoint);
         self.last_requote = Some(Instant::now());
         self.current_quotes = quotes;
+        Ok(())
+    }
 
+    /// Live tick: cancel stale orders, place new quotes, track fills.
+    pub async fn tick_live(
+        &mut self,
+        clob_client: &clob::Client<auth::state::Authenticated<auth::Normal>>,
+        signer: &impl Signer,
+    ) -> Result<()> {
+        let midpoint = self.fetch_midpoint(clob_client).await?;
+
+        // Reconcile existing orders to detect fills
+        if !self.tracked_orders.is_empty() {
+            orders::reconcile_orders(clob_client, &mut self.tracked_orders).await?;
+            self.update_inventory_from_fills();
+        }
+
+        if !self.should_requote(midpoint) {
+            return Ok(());
+        }
+
+        // Cancel stale orders before requoting
+        let stale_ids: Vec<String> = self
+            .tracked_orders
+            .iter()
+            .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            .map(|o| o.order_id.clone())
+            .collect();
+
+        if !stale_ids.is_empty() {
+            orders::cancel_orders(clob_client, &stale_ids).await?;
+        }
+
+        // Generate and place new quotes
+        let quotes = self.compute_quotes(midpoint);
+
+        let new_orders = orders::place_quotes(
+            clob_client,
+            signer,
+            &self.market.token_yes_id,
+            &self.market.token_no_id,
+            &quotes,
+        )
+        .await?;
+
+        self.tracked_orders = new_orders;
+        self.last_midpoint = Some(midpoint);
+        self.last_requote = Some(Instant::now());
+        self.current_quotes = quotes;
+
+        Ok(())
+    }
+
+    /// Update inventory based on detected fills.
+    fn update_inventory_from_fills(&mut self) {
+        for order in &self.tracked_orders {
+            if order.filled <= Decimal::ZERO {
+                continue;
+            }
+            let is_yes = order.token_id == self.market.token_yes_id;
+            match order.side {
+                Side::Buy => {
+                    if is_yes {
+                        self.inventory_yes += order.filled;
+                        self.total_bought_value += order.filled * order.price;
+                    } else {
+                        self.inventory_no += order.filled;
+                        self.total_bought_value += order.filled * order.price;
+                    }
+                }
+                Side::Sell => {
+                    if is_yes {
+                        self.inventory_yes -= order.filled;
+                        self.total_sold_value += order.filled * order.price;
+                    } else {
+                        self.inventory_no -= order.filled;
+                        self.total_sold_value += order.filled * order.price;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Cancel all active orders for this market.
+    pub async fn cancel_all(
+        &mut self,
+        clob_client: &clob::Client<auth::state::Authenticated<auth::Normal>>,
+    ) -> Result<()> {
+        let active_ids: Vec<String> = self
+            .tracked_orders
+            .iter()
+            .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            .map(|o| o.order_id.clone())
+            .collect();
+
+        if !active_ids.is_empty() {
+            orders::cancel_orders(clob_client, &active_ids).await?;
+        }
+
+        self.tracked_orders.clear();
+        info!(
+            market = %self.market.question,
+            "All orders cancelled for market"
+        );
         Ok(())
     }
 
