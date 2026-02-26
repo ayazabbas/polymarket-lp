@@ -15,6 +15,7 @@ use crate::config::StrategyConfig;
 use crate::orders::{self, OrderStatus, TrackedOrder};
 use crate::quoter::{self, Quote, QuoteParams};
 use crate::scanner::MarketInfo;
+use crate::ws::WsEvent;
 
 /// State for a single market's quoting engine.
 pub struct QuoteEngine {
@@ -30,6 +31,8 @@ pub struct QuoteEngine {
     /// Cumulative fill value for PnL tracking
     pub total_bought_value: Decimal,
     pub total_sold_value: Decimal,
+    /// Whether WS is connected (affects tick behavior)
+    pub ws_connected: bool,
 }
 
 impl QuoteEngine {
@@ -46,6 +49,7 @@ impl QuoteEngine {
             inventory_no: Decimal::ZERO,
             total_bought_value: Decimal::ZERO,
             total_sold_value: Decimal::ZERO,
+            ws_connected: false,
         }
     }
 
@@ -160,7 +164,7 @@ impl QuoteEngine {
         }
 
         let quotes = self.compute_quotes(midpoint);
-        self.log_dry_run(&quotes, midpoint);
+        self.log_dry_run_quotes(&quotes, midpoint);
 
         self.last_midpoint = Some(midpoint);
         self.last_requote = Some(Instant::now());
@@ -249,6 +253,92 @@ impl QuoteEngine {
         }
     }
 
+    /// Handle a WebSocket event. Returns true if a requote should be triggered.
+    pub fn handle_ws_event(&mut self, event: WsEvent) -> bool {
+        match event {
+            WsEvent::MidpointUpdate { midpoint, .. } => {
+                let should = self.should_requote(midpoint);
+                if should {
+                    self.last_midpoint = Some(midpoint);
+                }
+                should
+            }
+            WsEvent::BookUpdate {
+                best_bid, best_ask, ..
+            } => {
+                if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
+                    let mid = (bid + ask) / Decimal::TWO;
+                    let should = self.should_requote(mid);
+                    if should {
+                        self.last_midpoint = Some(mid);
+                    }
+                    should
+                } else {
+                    false
+                }
+            }
+            WsEvent::OrderFill {
+                order_id,
+                size,
+                price,
+            } => {
+                // Update the matching tracked order
+                if let Some(order) = self
+                    .tracked_orders
+                    .iter_mut()
+                    .find(|o| o.order_id == order_id)
+                {
+                    order.filled += size;
+                    if order.filled >= order.size {
+                        order.status = OrderStatus::Filled;
+                    } else {
+                        order.status = OrderStatus::PartiallyFilled;
+                    }
+                    info!(
+                        order_id = %order_id,
+                        fill_size = %size,
+                        fill_price = %price,
+                        total_filled = %order.filled,
+                        "WS fill detected"
+                    );
+
+                    // Update inventory immediately
+                    let is_yes = order.token_id == self.market.token_yes_id;
+                    match order.side {
+                        Side::Buy => {
+                            if is_yes {
+                                self.inventory_yes += size;
+                            } else {
+                                self.inventory_no += size;
+                            }
+                            self.total_bought_value += size * price;
+                        }
+                        Side::Sell => {
+                            if is_yes {
+                                self.inventory_yes -= size;
+                            } else {
+                                self.inventory_no -= size;
+                            }
+                            self.total_sold_value += size * price;
+                        }
+                        _ => {}
+                    }
+                }
+                false // Don't requote just because of a fill
+            }
+            WsEvent::Disconnected => {
+                self.ws_connected = false;
+                info!("WS disconnected, falling back to REST polling");
+                false
+            }
+            WsEvent::Reconnected => {
+                self.ws_connected = true;
+                info!("WS reconnected");
+                true // Requote on reconnect to ensure fresh state
+            }
+        }
+    }
+
     /// Cancel all active orders for this market.
     pub async fn cancel_all(
         &mut self,
@@ -273,7 +363,7 @@ impl QuoteEngine {
         Ok(())
     }
 
-    fn log_dry_run(&self, quotes: &[Quote], midpoint: Decimal) {
+    pub fn log_dry_run_quotes(&self, quotes: &[Quote], midpoint: Decimal) {
         info!(
             market = %self.market.question,
             midpoint = %midpoint,
