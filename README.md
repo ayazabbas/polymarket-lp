@@ -219,6 +219,3 @@ RUST_LOG=debug cargo run -- scan
 
 This is experimental software. Prediction markets involve risk of loss. The bot may lose money due to adverse price movements, inventory accumulation near resolution, or technical failures. Start with small amounts and monitor closely. Not financial advice.
 
-## License
-
-MIT
