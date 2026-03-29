@@ -3,3 +3,11 @@ config.toml
 .env
 *.pem
 *.key
+
+# Environment files — NEVER commit
+.env*
+.env
+.env.*
+.env.local
+.env.mainnet
+.env.testnet
